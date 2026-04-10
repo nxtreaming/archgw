@@ -1,6 +1,6 @@
-Plano Docs v0.4.11
+Plano Docs v0.4.18
 llms.txt (auto-generated)
-Generated (UTC): 2026-03-09T02:41:50.094997+00:00
+Generated (UTC): 2026-04-10T14:20:22.671342+00:00
 
 Table of contents
 - Agents (concepts/agents)
@@ -163,6 +163,8 @@ Because these behaviors live in the dataplane rather than inside individual agen
 
 Configuration example
 
+Agent listener filter chain
+
 The example below shows a configuration where an agent uses a filter chain with two filters: a query rewriter,
 and a context builder that prepares retrieval context before the agent runs.
 
@@ -218,6 +220,38 @@ The filters section defines the reusable filters, each running as its own HTTP/M
 The listeners section wires the rag_agent behind an agent listener and attaches a filter_chain with query_rewriter followed by context_builder.
 
 When a request arrives at agent_1, Plano executes the filters in order before handing control to rag_agent.
+
+Model listener filter chain
+
+Filter chains can also be attached directly to a model listener. This lets you run input guardrails on
+direct LLM proxy requests (/v1/chat/completions, /v1/responses, etc.) without an agent layer in between.
+
+Model listener with a content-safety filter chain
+
+filters:
+  - id: content_guard
+    url: http://content-guard:10500
+    type: http
+
+model_providers:
+  - model: openai/gpt-4o-mini
+    access_key: $OPENAI_API_KEY
+    default: true
+
+listeners:
+  - type: model
+    name: llm_gateway
+    port: 12000
+    filter_chain:
+      - content_guard
+
+In this setup:
+
+The filter_chain is declared at the listener level (not per-agent).
+
+When a request arrives at the model listener, Plano executes the filters in order before forwarding the request to the upstream LLM provider.
+
+If a filter rejects the request (HTTP 4xx), the error is returned to the caller and the LLM is never called.
 
 Filter Chain Programming Model (HTTP and MCP)
 
@@ -304,6 +338,10 @@ the scenes.
 Under the hood, Plano opens outbound HTTP(S) connections to upstream LLM providers using its unified API surface and
 smart model routing. For more details on how Plano talks to models and how providers are configured, see
 LLM providers.
+
+Model listeners also support Filter Chains. By adding a filter_chain to a model listener
+you can run input guardrails, content-safety checks, or other preprocessing on direct LLM requests before they reach
+the upstream provider — without requiring an agent layer.
 
 Configure Listeners
 
@@ -1751,6 +1789,61 @@ llm_providers:
   - model: zhipu/glm-4.5-air
     access_key: $ZHIPU_API_KEY
 
+Xiaomi MiMo
+
+Provider Prefix: xiaomi/
+
+API Endpoint: /v1/chat/completions
+
+Authentication: API Key - Create your key in the Xiaomi MiMo API Open Platform and set MIMO_API_KEY.
+
+Supported Chat Models: All Xiaomi MiMo chat models including mimo-v2-pro, mimo-v2-omni, mimo-v2-flash, and future chat model releases.
+
+
+
+
+
+
+
+Model Name
+
+Model ID for Config
+
+Description
+
+MiMo V2 Pro
+
+xiaomi/mimo-v2-pro
+
+Highest capability general model
+
+MiMo V2 Omni
+
+xiaomi/mimo-v2-omni
+
+Multimodal-capable assistant model
+
+MiMo V2 Flash
+
+xiaomi/mimo-v2-flash
+
+Faster, lower-latency model
+
+Configuration Examples:
+
+llm_providers:
+  # Configure all known Xiaomi models with wildcard expansion
+  - model: xiaomi/*
+    access_key: $MIMO_API_KEY
+
+  # Or configure specific models
+  - model: xiaomi/mimo-v2-pro
+    access_key: $MIMO_API_KEY
+    default: true
+
+  - model: xiaomi/mimo-v2-omni
+    access_key: $MIMO_API_KEY
+
 Providers Requiring Base URL
 
 The following providers require a base_url parameter to be configured. For detailed information on base URL configuration including path prefix behavior and examples, see base_url_details.
@@ -1967,7 +2060,7 @@ llm_providers:
 
 How Wildcards Work:
 
-Known Providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, Gemini, Together AI, xAI, Moonshot, Zhipu):
+Known Providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, Gemini, Together AI, xAI, Moonshot, Zhipu, Xiaomi):
 
 Expands at config load time to all models in Plano’s provider registry
 
@@ -3097,13 +3190,13 @@ $ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 Option 1: Install planoai with uv (Recommended)
 
-$ uv tool install planoai==0.4.11
+$ uv tool install planoai==0.4.18
 
 Option 2: Install with pip (Traditional)
 
 $ python -m venv venv
 $ source venv/bin/activate   # On Windows, use: venv\Scripts\activate
-$ pip install planoai==0.4.11
+$ pip install planoai==0.4.18
 
 
 
@@ -3755,6 +3848,168 @@ Transparent and Controllable: Makes routing decisions transparent and configurab
 Flexible and Adaptive: Supports evolving user needs, model updates, and new domains/actions without retraining the router.
 
 Production-Ready Performance: Optimized for low-latency, high-throughput applications in multi-model environments.
+
+Self-hosting Arch-Router
+
+By default, Plano uses a hosted Arch-Router endpoint. To run Arch-Router locally, you can serve the model yourself using either Ollama or vLLM.
+
+Using Ollama (recommended for local development)
+
+Install Ollama
+
+Download and install from ollama.ai.
+
+Pull and serve Arch-Router
+
+ollama pull hf.co/katanemo/Arch-Router-1.5B.gguf:Q4_K_M
+ollama serve
+
+This downloads the quantized GGUF model from HuggingFace and starts serving on http://localhost:11434.
+
+Configure Plano to use local Arch-Router
+
+overrides:
+  llm_routing_model: plano/hf.co/katanemo/Arch-Router-1.5B.gguf:Q4_K_M
+
+model_providers:
+  - model: plano/hf.co/katanemo/Arch-Router-1.5B.gguf:Q4_K_M
+    base_url: http://localhost:11434
+
+  - model: openai/gpt-5.2
+    access_key: $OPENAI_API_KEY
+    default: true
+
+  - model: anthropic/claude-sonnet-4-5
+    access_key: $ANTHROPIC_API_KEY
+    routing_preferences:
+      - name: creative writing
+        description: creative content generation, storytelling, and writing assistance
+
+Verify the model is running
+
+curl http://localhost:11434/v1/models
+
+You should see Arch-Router-1.5B listed in the response.
+
+Using vLLM (recommended for production / EC2)
+
+vLLM provides higher throughput and GPU optimizations suitable for production deployments.
+
+Install vLLM
+
+pip install vllm
+
+Download the model weights
+
+The GGUF weights are downloaded automatically from HuggingFace on first use. To pre-download:
+
+pip install huggingface_hub
+huggingface-cli download katanemo/Arch-Router-1.5B.gguf
+
+Start the vLLM server
+
+After downloading, find the GGUF file and Jinja template in the HuggingFace cache:
+
+# Find the downloaded files
+SNAPSHOT_DIR=$(ls -d ~/.cache/huggingface/hub/models--katanemo--Arch-Router-1.5B.gguf/snapshots/*/ | head -1)
+
+vllm serve ${SNAPSHOT_DIR}Arch-Router-1.5B-Q4_K_M.gguf \
+    --host 0.0.0.0 \
+    --port 10000 \
+    --load-format gguf \
+    --chat-template ${SNAPSHOT_DIR}template.jinja \
+    --tokenizer katanemo/Arch-Router-1.5B \
+    --served-model-name Arch-Router \
+    --gpu-memory-utilization 0.3 \
+    --tensor-parallel-size 1 \
+    --enable-prefix-caching
+
+Configure Plano to use the vLLM endpoint
+
+overrides:
+  llm_routing_model: plano/Arch-Router
+
+model_providers:
+  - model: plano/Arch-Router
+    base_url: http://<your-server-ip>:10000
+
+  - model: openai/gpt-5.2
+    access_key: $OPENAI_API_KEY
+    default: true
+
+  - model: anthropic/claude-sonnet-4-5
+    access_key: $ANTHROPIC_API_KEY
+    routing_preferences:
+      - name: creative writing
+        description: creative content generation, storytelling, and writing assistance
+
+Verify the server is running
+
+curl http://localhost:10000/health
+curl http://localhost:10000/v1/models
+
+Using vLLM on Kubernetes (GPU nodes)
+
+For teams running Kubernetes, Arch-Router and Plano can be deployed as in-cluster services.
+The demos/llm_routing/model_routing_service/ directory includes ready-to-use manifests:
+
+vllm-deployment.yaml — Arch-Router served by vLLM, with an init container to download
+the model from HuggingFace
+
+plano-deployment.yaml — Plano proxy configured to use the in-cluster Arch-Router
+
+config_k8s.yaml — Plano config with llm_routing_model pointing at
+http://arch-router:10000 instead of the default hosted endpoint
+
+Key things to know before deploying:
+
+GPU nodes commonly have a nvidia.com/gpu:NoSchedule taint — the vllm-deployment.yaml
+includes a matching toleration. The nvidia.com/gpu: "1" resource request is sufficient
+for scheduling in most clusters; a nodeSelector is optional and commented out in the
+manifest for cases where you need to pin to a specific GPU node pool.
+
+Model download takes ~1 minute; vLLM loads the model in ~1-2 minutes after that. The
+livenessProbe has a 180-second initialDelaySeconds to avoid premature restarts.
+
+The Plano config ConfigMap must use --from-file=plano_config.yaml=config_k8s.yaml with
+subPath in the Deployment — omitting subPath causes Kubernetes to mount a directory
+instead of a file.
+
+For the canonical Plano Kubernetes deployment (ConfigMap, Secrets, Deployment YAML), see
+deployment. For full step-by-step commands specific to this demo, see the
+demo README.
+
+
+
+Model Affinity
+
+In agentic loops — where a single user request triggers multiple LLM calls through tool use — Plano’s router classifies each turn independently. Because successive prompts differ in intent (tool selection looks like code generation, reasoning about results looks like analysis), the router may select different models mid-session. This causes behavioral inconsistency and invalidates provider-side KV caches, increasing both latency and cost.
+
+Model affinity pins the routing decision for the duration of a session. Send an X-Model-Affinity header with any string identifier (typically a UUID). The first request routes normally and caches the result. All subsequent requests with the same affinity ID skip routing and reuse the cached model.
+
+import uuid
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:12000/v1", api_key="EMPTY")
+affinity_id = str(uuid.uuid4())
+
+# Every call in the loop uses the same header
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=messages,
+    tools=tools,
+    extra_headers={"X-Model-Affinity": affinity_id},
+)
+
+Without the header, routing runs fresh on every request — no behavior change for existing clients.
+
+Configuration:
+
+routing:
+  session_ttl_seconds: 600    # How long affinity lasts (default: 10 min)
+  session_max_entries: 10000  # Max cached sessions (upper limit: 10000)
+
+To start a new routing decision (e.g., when the agent’s task changes), generate a new affinity ID.
 
 Combining Routing Methods
 
@@ -5317,6 +5572,75 @@ agents:
   - id: troubleshoot_agent
     description: Diagnoses and resolves technical issues step by step
 
+Self-hosting Plano-Orchestrator
+
+By default, Plano uses a hosted Plano-Orchestrator endpoint. To self-host the orchestrator model, you can serve it using vLLM on a server with an NVIDIA GPU.
+
+vLLM requires a Linux server with an NVIDIA GPU (CUDA). For local development on macOS, a GGUF version for Ollama is coming soon.
+
+The following model variants are available on HuggingFace:
+
+Plano-Orchestrator-4B — lighter model, suitable for development and testing
+
+Plano-Orchestrator-4B-FP8 — FP8 quantized 4B model, lower memory usage
+
+Plano-Orchestrator-30B-A3B — full-size model for production
+
+Plano-Orchestrator-30B-A3B-FP8 — FP8 quantized 30B model, recommended for production deployments
+
+Install vLLM
+
+pip install vllm
+
+Download the model and chat template
+
+pip install huggingface_hub
+huggingface-cli download katanemo/Plano-Orchestrator-4B
+
+Start the vLLM server
+
+For the 4B model (development):
+
+vllm serve katanemo/Plano-Orchestrator-4B \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --tensor-parallel-size 1 \
+    --gpu-memory-utilization 0.3 \
+    --tokenizer katanemo/Plano-Orchestrator-4B \
+    --chat-template chat_template.jinja \
+    --served-model-name katanemo/Plano-Orchestrator-4B \
+    --enable-prefix-caching
+
+For the 30B-A3B-FP8 model (production):
+
+vllm serve katanemo/Plano-Orchestrator-30B-A3B-FP8 \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --tensor-parallel-size 1 \
+    --gpu-memory-utilization 0.9 \
+    --tokenizer katanemo/Plano-Orchestrator-30B-A3B-FP8 \
+    --chat-template chat_template.jinja \
+    --max-model-len 32768 \
+    --served-model-name katanemo/Plano-Orchestrator-30B-A3B-FP8 \
+    --enable-prefix-caching
+
+Configure Plano to use the local orchestrator
+
+Use the model name matching your --served-model-name:
+
+overrides:
+  agent_orchestration_model: plano/katanemo/Plano-Orchestrator-4B
+
+model_providers:
+  - model: katanemo/Plano-Orchestrator-4B
+    provider_interface: plano
+    base_url: http://<your-server-ip>:8000
+
+Verify the server is running
+
+curl http://localhost:8000/health
+curl http://localhost:8000/v1/models
+
 Next Steps
 
 Learn more about agents and the inner vs. outer loop model
@@ -6091,12 +6415,29 @@ model_providers:
   - model: mistral/ministral-3b-latest
     access_key: $MISTRAL_API_KEY
 
-  # Example: Passthrough authentication for LiteLLM or similar proxies
-  # When passthrough_auth is true, client's Authorization header is forwarded
-  # instead of using the configured access_key
+  # routing_preferences: tags a model with named capabilities so Plano's LLM router
+  # can select the best model for each request based on intent. Requires the
+  # Arch-Router model (or equivalent) to be configured in overrides.llm_routing_model.
+  # Each preference has a name (short label) and a description (used for intent matching).
+  - model: groq/llama-3.3-70b-versatile
+    access_key: $GROQ_API_KEY
+    routing_preferences:
+      - name: code generation
+        description: generating new code snippets, functions, or boilerplate based on user prompts or requirements
+      - name: code review
+        description: reviewing, analyzing, and suggesting improvements to existing code
+
+  # passthrough_auth: forwards the client's Authorization header upstream instead of
+  # using the configured access_key. Useful for LiteLLM or similar proxy setups.
   - model: openai/gpt-4o-litellm
     base_url: https://litellm.example.com
     passthrough_auth: true
+
+  # Custom/self-hosted endpoint with explicit http_host override
+  - model: openai/llama-3.3-70b
+    base_url: https://api.custom-provider.com
+    http_host: api.custom-provider.com
+    access_key: $CUSTOM_API_KEY
 
 # Model aliases - use friendly names instead of full provider model names
 model_aliases:
@@ -6117,7 +6458,7 @@ listeners:
     agents:
       - id: rag_agent
         description: virtual assistant for retrieval augmented generation tasks
-        filter_chain:
+        input_filters:
           - input_guards
 
   # Model listener for direct LLM access
@@ -6125,22 +6466,37 @@ listeners:
     name: model_1
     address: 0.0.0.0
     port: 12000
+    timeout: 30s          # Request timeout (e.g. "30s", "60s")
+    max_retries: 3        # Number of retries on upstream failure
+    input_filters:        # Filters applied before forwarding to LLM
+      - input_guards
+    output_filters:       # Filters applied to LLM responses before returning to client
+      - input_guards
 
   # Prompt listener for function calling (for prompt_targets)
   - type: prompt
     name: prompt_function_listener
     address: 0.0.0.0
     port: 10000
-    # This listener is used for prompt_targets and function calling
 
 # Reusable service endpoints
 endpoints:
   app_server:
     endpoint: 127.0.0.1:80
     connect_timeout: 0.005s
+    protocol: http        # http or https
 
   mistral_local:
     endpoint: 127.0.0.1:8001
+
+  secure_service:
+    endpoint: api.example.com:443
+    protocol: https
+    http_host: api.example.com  # Override the Host header sent upstream
+
+# Optional top-level system prompt applied to all prompt_targets
+system_prompt: |
+  You are a helpful assistant. Always respond concisely and accurately.
 
 # Prompt targets for function calling and API orchestration
 prompt_targets:
@@ -6160,11 +6516,83 @@ prompt_targets:
       name: app_server
       path: /weather
       http_method: POST
+    # Per-target system prompt (overrides top-level system_prompt for this target)
+    system_prompt: You are a weather expert. Provide accurate and concise weather information.
+    # auto_llm_dispatch_on_response: when true, the LLM is called again with the
+    # function response to produce a final natural-language answer for the user
+    auto_llm_dispatch_on_response: true
+
+# Rate limits - control token usage per model and request selector
+ratelimits:
+  - model: openai/gpt-4o
+    selector:
+      key: x-user-id       # HTTP header key used to identify the rate-limit subject
+      value: "*"           # Wildcard matches any value; use a specific string to target one
+    limit:
+      tokens: 100000       # Maximum tokens allowed in the given time unit
+      unit: hour           # Time unit: "minute", "hour", or "day"
+
+  - model: openai/gpt-4o-mini
+    selector:
+      key: x-org-id
+      value: acme-corp
+    limit:
+      tokens: 500000
+      unit: day
+
+# Global behavior overrides
+overrides:
+  # Threshold for routing a request to a prompt_target (0.0–1.0). Lower = more permissive.
+  prompt_target_intent_matching_threshold: 0.7
+  # Trim conversation history to fit within the model's context window
+  optimize_context_window: true
+  # Use Plano's agent orchestrator for multi-agent request routing
+  use_agent_orchestrator: false
+  # Connect timeout for upstream provider clusters (e.g., "5s", "10s"). Default: "5s"
+  upstream_connect_timeout: 10s
+  # Path to the trusted CA bundle for upstream TLS verification
+  upstream_tls_ca_path: /etc/ssl/certs/ca-certificates.crt
+  # Model used for intent-based LLM routing (must be listed in model_providers)
+  llm_routing_model: Arch-Router
+  # Model used for agent orchestration (must be listed in model_providers)
+  agent_orchestration_model: Plano-Orchestrator
+
+# Model affinity — pin routing decisions for agentic loops
+routing:
+  session_ttl_seconds: 600    # How long a pinned session lasts (default: 600s / 10 min)
+  session_max_entries: 10000  # Max cached sessions before eviction (upper limit: 10000)
+
+# State storage for multi-turn conversation history
+state_storage:
+  type: memory            # "memory" (in-process) or "postgres" (persistent)
+  # connection_string is required when type is postgres.
+  # Supports environment variable substitution: $VAR or ${VAR}
+  # connection_string: postgresql://user:$DB_PASS@localhost:5432/plano
+
+# Input guardrails applied globally to all incoming requests
+prompt_guards:
+  input_guards:
+    jailbreak:
+      on_exception:
+        message: "I'm sorry, I can't help with that request."
 
 # OpenTelemetry tracing configuration
 tracing:
   # Random sampling percentage (1-100)
   random_sampling: 100
+  # Include internal Plano spans in traces
+  trace_arch_internal: false
+  # gRPC endpoint for OpenTelemetry collector (e.g., Jaeger, Tempo)
+  opentracing_grpc_endpoint: http://localhost:4317
+  span_attributes:
+    # Propagate request headers whose names start with these prefixes as span attributes
+    header_prefixes:
+      - x-user-
+      - x-org-
+    # Static key/value pairs added to every span
+    static:
+      environment: production
+      service.team: platform
 
 ---
 
@@ -6223,7 +6651,7 @@ Create a docker-compose.yml file with the following configuration:
 # docker-compose.yml
 services:
   plano:
-    image: katanemo/plano:0.4.11
+    image: katanemo/plano:0.4.18
     container_name: plano
     ports:
       - "10000:10000" # ingress (client -> plano)
@@ -6250,6 +6678,187 @@ You can also use the CLI with Docker mode:
 
 planoai up plano_config.yaml --docker
 planoai down --docker
+
+Kubernetes Deployment
+
+Plano runs as a single container in Kubernetes. The container bundles Envoy, WASM plugins, and brightstaff, managed by supervisord internally. Deploy it as a standard Kubernetes Deployment with your plano_config.yaml mounted via a ConfigMap and API keys injected via a Secret.
+
+All environment variables referenced in your plano_config.yaml (e.g. $OPENAI_API_KEY) must be set in the container environment. Use Kubernetes Secrets for API keys.
+
+Step 1: Create the Config
+
+Store your plano_config.yaml in a ConfigMap:
+
+kubectl create configmap plano-config --from-file=plano_config.yaml=./plano_config.yaml
+
+Step 2: Create API Key Secrets
+
+Store your LLM provider API keys in a Secret:
+
+kubectl create secret generic plano-secrets \
+  --from-literal=OPENAI_API_KEY=sk-... \
+  --from-literal=ANTHROPIC_API_KEY=sk-ant-...
+
+Step 3: Deploy Plano
+
+Create a plano-deployment.yaml:
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plano
+  labels:
+    app: plano
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: plano
+  template:
+    metadata:
+      labels:
+        app: plano
+    spec:
+      containers:
+        - name: plano
+          image: katanemo/plano:0.4.18
+          ports:
+            - containerPort: 12000  # LLM gateway (chat completions, model routing)
+              name: llm-gateway
+          envFrom:
+            - secretRef:
+                name: plano-secrets
+          env:
+            - name: LOG_LEVEL
+              value: "info"
+          volumeMounts:
+            - name: plano-config
+              mountPath: /app/plano_config.yaml
+              subPath: plano_config.yaml
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 12000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 12000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+      volumes:
+        - name: plano-config
+          configMap:
+            name: plano-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: plano
+spec:
+  selector:
+    app: plano
+  ports:
+    - name: llm-gateway
+      port: 12000
+      targetPort: 12000
+
+Apply it:
+
+kubectl apply -f plano-deployment.yaml
+
+Step 4: Verify
+
+# Check pod status
+kubectl get pods -l app=plano
+
+# Check logs
+kubectl logs -l app=plano -f
+
+# Test routing (port-forward for local testing)
+kubectl port-forward svc/plano 12000:12000
+
+curl -s -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"tell me a joke"}], "model":"none"}' \
+  http://localhost:12000/v1/chat/completions | jq .model
+
+Updating Configuration
+
+To update plano_config.yaml, replace the ConfigMap and restart the pod:
+
+kubectl create configmap plano-config \
+  --from-file=plano_config.yaml=./plano_config.yaml \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl rollout restart deployment/plano
+
+Enabling OTEL Tracing
+
+Plano emits OpenTelemetry traces for every request — including routing decisions, model selection, and upstream latency. To export traces to an OTEL collector in your cluster, add the tracing section to your plano_config.yaml:
+
+tracing:
+  opentracing_grpc_endpoint: "http://otel-collector.monitoring:4317"
+  random_sampling: 100       # percentage of requests to trace (1-100)
+  trace_arch_internal: true  # include internal Plano spans
+  span_attributes:
+    header_prefixes:         # capture request headers as span attributes
+      - "x-"
+    static:                  # add static attributes to all spans
+      environment: "production"
+      service: "plano"
+
+Set the OTEL_TRACING_GRPC_ENDPOINT environment variable or configure it directly in the config. Plano propagates the traceparent header end-to-end, so traces correlate across your upstream and downstream services.
+
+Environment Variables Reference
+
+The following environment variables can be set on the container:
+
+
+
+
+
+
+
+Variable
+
+Description
+
+Default
+
+LOG_LEVEL
+
+Log verbosity (debug, info, warn, error)
+
+info
+
+OPENAI_API_KEY
+
+OpenAI API key (if referenced in config)
+
+
+
+ANTHROPIC_API_KEY
+
+Anthropic API key (if referenced in config)
+
+
+
+OTEL_TRACING_GRPC_ENDPOINT
+
+OTEL collector endpoint for trace export
+
+http://localhost:4317
+
+Any environment variable referenced in plano_config.yaml with $VAR_NAME syntax will be substituted at startup. Use Kubernetes Secrets for sensitive values and ConfigMaps or env entries for non-sensitive configuration.
 
 Runtime Tests
 
