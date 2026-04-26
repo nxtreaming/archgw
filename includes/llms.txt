@@ -1,6 +1,6 @@
-Plano Docs v0.4.18
+Plano Docs v0.4.22
 llms.txt (auto-generated)
-Generated (UTC): 2026-04-10T14:20:22.671342+00:00
+Generated (UTC): 2026-04-26T03:31:21.746661+00:00
 
 Table of contents
 - Agents (concepts/agents)
@@ -1381,7 +1381,9 @@ Complex agents and coding
 
 Configuration Examples:
 
-llm_providers:
+version: v0.4.0
+
+model_providers:
   # Configure all Anthropic models with wildcard
   - model: anthropic/*
     access_key: $ANTHROPIC_API_KEY
@@ -1402,8 +1404,12 @@ llm_providers:
 
   - model: anthropic/claude-sonnet-4-20250514
     access_key: $ANTHROPIC_PROD_API_KEY
-    routing_preferences:
-      - name: code_generation
+
+routing_preferences:
+  - name: code_generation
+    description: generating new code snippets, functions, or boilerplate based on user prompts or requirements
+    models:
+      - anthropic/claude-sonnet-4-20250514
 
 DeepSeek
 
@@ -2084,7 +2090,9 @@ Overriding Wildcard Models:
 
 You can configure specific models with custom settings even when using wildcards. Specific configurations take precedence and are excluded from wildcard expansion:
 
-llm_providers:
+version: v0.4.0
+
+model_providers:
   # Expand to all Anthropic models
   - model: anthropic/*
     access_key: $ANTHROPIC_API_KEY
@@ -2093,13 +2101,16 @@ llm_providers:
   # This model will NOT be included in the wildcard expansion above
   - model: anthropic/claude-sonnet-4-20250514
     access_key: $ANTHROPIC_PROD_API_KEY
-    routing_preferences:
-      - name: code_generation
-        priority: 1
 
   # Another specific override
   - model: anthropic/claude-3-haiku-20240307
     access_key: $ANTHROPIC_DEV_API_KEY
+
+routing_preferences:
+  - name: code_generation
+    description: generating new code snippets, functions, or boilerplate based on user prompts or requirements
+    models:
+      - anthropic/claude-sonnet-4-20250514
 
 Custom Provider Wildcards:
 
@@ -2139,22 +2150,33 @@ llm_providers:
 
 Routing Preferences
 
-Configure routing preferences for dynamic model selection:
+Starting in v0.4.0, configure routing preferences at the top level of the config. Each preference declares an ordered models candidate pool; the first entry is primary and the rest are fallbacks the client tries on 429/5xx errors. Multiple providers can serve the same route — just list them all under models. See /guides/llm_router for the full routing model.
 
-llm_providers:
+version: v0.4.0
+
+model_providers:
   - model: openai/gpt-5.2
     access_key: $OPENAI_API_KEY
-    routing_preferences:
-      - name: complex_reasoning
-        description: deep analysis, mathematical problem solving, and logical reasoning
-      - name: code_review
-        description: reviewing and analyzing existing code for bugs and improvements
 
   - model: anthropic/claude-sonnet-4-5
     access_key: $ANTHROPIC_API_KEY
-    routing_preferences:
-      - name: creative_writing
-        description: creative content generation, storytelling, and writing assistance
+
+routing_preferences:
+  - name: complex_reasoning
+    description: deep analysis, mathematical problem solving, and logical reasoning
+    models:
+      - openai/gpt-5.2
+      - anthropic/claude-sonnet-4-5
+  - name: code_review
+    description: reviewing and analyzing existing code for bugs and improvements
+    models:
+      - openai/gpt-5.2
+  - name: creative_writing
+    description: creative content generation, storytelling, and writing assistance
+    models:
+      - anthropic/claude-sonnet-4-5
+
+v0.3.0 configs that declare routing_preferences inline under each model_provider are auto-migrated to this top-level shape by the Plano CLI at compile time, with a deprecation warning. Update to the form above to silence the warning and gain the multi-model fallback behavior.
 
 
 
@@ -2556,225 +2578,562 @@ Doc: concepts/signals
 
 Signals™
 
-Agentic Signals are behavioral and executions quality indicators that act as early warning signs of agent performance—highlighting both brilliant successes and severe failures. These signals are computed directly from conversation traces without requiring manual labeling or domain expertise, making them practical for production observability at scale.
+Agentic Signals are lightweight, model-free behavioral indicators computed
+from live interaction trajectories and attached to your existing
+OpenTelemetry traces. They are the instrumentation layer of a closed-loop
+improvement flywheel for agents — turning raw production traffic into
+prioritized data that can drive prompt, routing, and model updates without
+running an LLM-as-judge on every session.
 
-The Problem: Knowing What’s “Good”
+The framework implemented here follows the taxonomy and detector design in
+Signals: Trajectory Sampling and Triage for Agentic Interactions
+(Chen et al., 2026). All detectors
+are computed without model calls; the entire pipeline attaches structured
+attributes and span events to existing spans so your dashboards and alerts
+work unmodified.
 
-One of the hardest parts of building agents is measuring how well they perform in the real world.
+Why Signals Matter: The Improvement Flywheel
 
-Offline testing relies on hand-picked examples and happy-path scenarios, missing the messy diversity of real usage. Developers manually prompt models, evaluate responses, and tune prompts by guesswork—a slow, incomplete feedback loop.
+Agentic applications are increasingly deployed at scale, yet improving them
+after deployment remains difficult. Production trajectories are long,
+numerous, and non-deterministic, making exhaustive human review infeasible
+and auxiliary LLM evaluation expensive. As a result, teams face a
+bottleneck: they cannot score every response, inspect every trace, or
+reliably identify which failures and successes should inform the next model
+update. Without a low-cost triage layer, the feedback loop from production
+behavior to model improvement remains incomplete.
 
-Production debugging floods developers with traces and logs but provides little guidance on which interactions actually matter. Finding failures means painstakingly reconstructing sessions and manually labeling quality issues.
+Signals close this loop by cheaply identifying which interactions among
+millions are worth inspecting:
 
-You can’t score every response with an LLM-as-judge (too expensive, too slow) or manually review every trace (doesn’t scale). What you need are behavioral signals—fast, economical proxies that don’t label quality outright but dramatically shrink the search space, pointing to sessions most likely to be broken or brilliant.
+Instrument. Live trajectories are scored with model-free signals
+attached as structured attributes on existing OpenTelemetry spans,
+organized under a fixed taxonomy of interaction, execution, and
+environment signals. This requires no additional model calls,
+infrastructure, or changes to online agent behavior.
+
+Sample & triage. Signal attributes act as filters: they surface
+severe failures, retrieve representative exemplars, and exclude the
+uninformative middle. In our experiments, signal-based sampling
+achieves 82% informativeness on \tau-bench, compared with 54%
+for random sampling, yielding a 1.52× efficiency gain per informative
+trajectory.
+
+Data Construction. The triaged subset becomes targeted input for
+constructing preference datasets or supervised fine-tuning datasets
+from production trajectories.
+
+Model Optimization. The resulting preference or supervised
+fine-tuning data is used to update the model through methods such as
+DPO, RLHF, or supervised fine-tuning, so optimization is driven by
+targeted production behavior rather than undifferentiated trace noise.
+
+Deploy. The improved model is deployed and immediately
+re-instrumented with the same signals, enabling teams to measure
+whether the change improved production behavior and to feed the next
+iteration.
+
+This loop depends on the first step being nearly free. The framework is
+therefore designed around fixed-taxonomy, model-free detectors with
+O(\text{messages}) cost, no online behavior change, and no
+dependence on expensive evaluator models. By making production traces
+searchable and sampleable at scale, signals turn raw agent telemetry into a
+practical model-optimization flywheel.
 
 What Are Behavioral Signals?
 
-Behavioral signals are canaries in the coal mine—early, objective indicators that something may have gone wrong (or gone exceptionally well). They don’t explain why an agent failed, but they reliably signal where attention is needed.
+Behavioral signals are canaries in the coal mine — early, objective
+indicators that something may have gone wrong (or gone exceptionally well).
+They don’t explain why an agent failed, but they reliably signal where
+attention is needed.
 
 These signals emerge naturally from the rhythm of interaction:
 
-A user rephrasing the same request
+A user rephrasing or correcting the same request
 
 Sharp increases in conversation length
 
-Frustrated follow-up messages (ALL CAPS, “this doesn’t work”, excessive !!!/???)
+Negative stance markers (“this doesn’t work”, ALL CAPS, excessive !!! or ???)
 
-Agent repetition / looping
+Agent repetition or tool-call loops
 
-Expressions of gratitude or satisfaction
+Expressions of gratitude, confirmation, or task success
 
-Requests to speak to a human / contact support
+Requests for a human agent or explicit quit intent
 
-Individually, these clues are shallow; together, they form a fingerprint of agent performance. Embedded directly into traces, they make it easy to spot friction as it happens: where users struggle, where agents loop, and where escalations occur.
+Tool errors, timeouts, rate limits, and context-window exhaustion
 
-Signals vs Response Quality
+Individually, these clues are shallow; together, they form a fingerprint of
+agent performance. Embedded directly into traces, they make it easy to spot
+friction as it happens: where users struggle, where agents loop, where tool
+failures cluster, and where escalations occur.
 
-Behavioral signals and response quality are complementary.
+Signal Taxonomy
 
-Response Quality
+Signals are organized into three top-level layers, each with its own
+intent. Every detected signal belongs to exactly one leaf type under one of
+seven categories. The per-category summaries and leaf-type descriptions
+below are borrowed verbatim from the reference implementation at
+katanemo/signals to keep the
+documentation and the detector contract in sync.
 
-Domain-specific correctness: did the agent do the right thing given business rules, user intent, and operational context? This often requires subject-matter experts or outcome instrumentation and is time-intensive but irreplaceable.
+Interaction — user ↔ agent conversational quality
 
-Behavioral Signals
+Misalignment — Misalignment signals capture semantic or intent mismatch
+between the user and the agent, such as rephrasing, corrections,
+clarifications, and restated constraints. These signals do not assert that
+either party is “wrong”; they only indicate that shared understanding has
+not yet been established.
 
-Observable patterns that correlate with quality: high repair frequency, excessive turns, frustration markers, repetition, escalation, and positive feedback. Fast to compute and valuable for prioritizing which traces deserve inspection.
 
-Used together, signals tell you where to look, and quality evaluation tells you what went wrong (or right).
+
+
+
+Leaf signal type
+
+Description
+
+misalignment.correction
+
+Explicit corrections, negations, mistake acknowledgments.
+
+misalignment.rephrase
+
+Rephrasing indicators, alternative explanations.
+
+misalignment.clarification
+
+Confusion expressions, requests for clarification.
+
+Stagnation — Stagnation signals capture cases where the discourse
+continues but fails to make visible progress. This includes near-duplicate
+assistant responses, circular explanations, repeated scaffolding, and other
+forms of linguistic degeneration.
+
+
+
+
+
+Leaf signal type
+
+Description
+
+stagnation.dragging
+
+Excessive turn count, conversation not progressing efficiently.
+
+stagnation.repetition
+
+Near-duplicate or repetitive assistant responses.
+
+Disengagement — Disengagement signals mark the withdrawal of
+cooperative intent from the interaction. These include explicit requests to
+exit the agent flow (e.g., “talk to a human”), strong negative stances, and
+abandonment markers.
+
+
+
+
+
+Leaf signal type
+
+Description
+
+disengagement.escalation
+
+Requests for human agent or support.
+
+disengagement.quit
+
+Notification to quit or leave.
+
+disengagement.negative_stance
+
+Complaints, frustration, negative sentiment.
+
+Satisfaction — Satisfaction signals indicate explicit stabilization and
+completion of the interaction. These include expressions of gratitude,
+success confirmations, and closing utterances. We use these signals to
+sample exemplar traces rather than to assign quality scores.
+
+
+
+
+
+Leaf signal type
+
+Description
+
+satisfaction.gratitude
+
+Expressions of thanks and appreciation.
+
+satisfaction.confirmation
+
+Explicit satisfaction expressions.
+
+satisfaction.success
+
+Confirmation of task completion or understanding.
+
+Execution — agent-caused action quality
+
+Failure — Detects agent-caused failures in tool/function usage. These
+are issues the agent is responsible for (as opposed to environment failures
+which are external system issues). Requires tool-call traces
+(function_call / observation) to fire.
+
+
+
+
+
+Leaf signal type
+
+Description
+
+execution.failure.invalid_args
+
+Wrong type, missing required field.
+
+execution.failure.bad_query
+
+Empty results due to overly narrow/wrong query.
+
+execution.failure.tool_not_found
+
+Agent called non-existent tool.
+
+execution.failure.auth_misuse
+
+Agent didn’t pass credentials correctly.
+
+execution.failure.state_error
+
+Tool called in wrong state/order.
+
+Loops — Detects behavioral patterns where the agent gets stuck
+repeating tool calls. These are distinct from
+interaction.stagnation (conversation text repetition) and
+execution.failure (single tool errors) — these detect tool-level
+behavioral loops.
+
+
+
+
+
+Leaf signal type
+
+Description
+
+execution.loops.retry
+
+Same tool with identical args ≥3 times.
+
+execution.loops.parameter_drift
+
+Same tool with varied args ≥3 times.
+
+execution.loops.oscillation
+
+Multi-tool A→B→A→B pattern ≥3 cycles.
+
+Environment — external system / boundary conditions
+
+Exhaustion — Detects failures and constraints arising from the
+surrounding system rather than the agent’s internal policy or reasoning.
+These are external issues the agent cannot control.
+
+
+
+
+
+Leaf signal type
+
+Description
+
+environment.exhaustion.api_error
+
+5xx errors, service unavailable.
+
+environment.exhaustion.timeout
+
+Connection/read timeouts.
+
+environment.exhaustion.rate_limit
+
+429, quota exceeded.
+
+environment.exhaustion.network
+
+Connection refused, DNS errors.
+
+environment.exhaustion.malformed_response
+
+Invalid JSON, unexpected schema.
+
+environment.exhaustion.context_overflow
+
+Token/context limit exceeded.
 
 How It Works
 
-Signals are computed automatically by the gateway and emitted as OpenTelemetry trace attributes to your existing observability stack (Jaeger, Honeycomb, Grafana Tempo, etc.). No additional libraries or instrumentation required—just configure your OTEL collector endpoint.
+Signals are computed automatically by the gateway after each assistant
+response and emitted as OpenTelemetry trace attributes and span events
+on your existing spans. No additional libraries or instrumentation are
+required — just configure your OTEL collector endpoint as usual.
 
-Each conversation trace is enriched with signal attributes that you can query, filter, and visualize in your observability platform. The gateway analyzes message content (performing text normalization, Unicode handling, and pattern matching) to compute behavioral signals in real-time.
+Each conversation trace is enriched with layered signal attributes
+(category-level counts and severities) plus one span event per detected
+signal instance (with confidence, snippet, and per-detector metadata).
 
-OTEL Trace Attributes
+Signal analysis is enabled by default and runs on the request path. It
+does not affect the response sent to the client. Set
+overrides.disable_signals: true in your Plano config to skip this
+CPU-heavy analysis (see the configuration reference).
 
-Signal data is exported as structured span attributes:
+OTel Span Attributes
 
-signals.quality - Overall assessment (Excellent/Good/Neutral/Poor/Severe)
+Signal data is exported as structured OTel attributes. There are two tiers:
+top-level attributes (always emitted on spans that carry signal
+analysis) and layered attributes (emitted only when the corresponding
+category has at least one signal instance).
 
-signals.turn_count - Total number of turns in the conversation
+Top-level attributes
 
-signals.efficiency_score - Efficiency metric (0.0-1.0)
+Always emitted once signals are computed.
 
-signals.repair.count - Number of repair attempts detected (when present)
 
-signals.repair.ratio - Ratio of repairs to user turns (when present)
 
-signals.frustration.count - Number of frustration indicators detected
 
-signals.frustration.severity - Frustration level (0-3)
 
-signals.repetition.count - Number of repetition instances detected
 
-signals.escalation.requested - Boolean escalation flag (“true” when present)
 
-signals.positive_feedback.count - Number of positive feedback indicators
+Attribute
+
+Type
+
+Value
+
+signals.quality
+
+string
+
+One of excellent, good, neutral, poor, severe.
+
+signals.quality_score
+
+float
+
+Numeric score 0.0 – 100.0 that feeds the quality bucket.
+
+signals.turn_count
+
+int
+
+Total number of user + assistant turns in the interaction.
+
+signals.efficiency_score
+
+float
+
+Efficiency metric 0.0 – 1.0 (stays at 1.0 up to baseline turns,
+then decays: 1 / (1 + 0.3 * (turns - baseline))).
+
+Layered attributes
+
+Emitted per category, only when count > 0. One .count and one
+.severity attribute per category. Severity is a 0–3 bucket (see
+Severity levels below).
+
+
+
+
+
+Attribute (emitted when fired)
+
+Source
+
+signals.interaction.misalignment.count
+
+Any misalignment.* leaf type
+
+signals.interaction.misalignment.severity
+
+“
+
+signals.interaction.stagnation.count
+
+Any stagnation.* leaf type
+
+signals.interaction.stagnation.severity
+
+“
+
+signals.interaction.disengagement.count
+
+Any disengagement.* leaf type
+
+signals.interaction.disengagement.severity
+
+“
+
+signals.interaction.satisfaction.count
+
+Any satisfaction.* leaf type
+
+signals.interaction.satisfaction.severity
+
+“
+
+signals.execution.failure.count
+
+Any failure.* leaf type
+
+signals.execution.failure.severity
+
+“
+
+signals.execution.loops.count
+
+Any loops.* leaf type
+
+signals.execution.loops.severity
+
+“
+
+signals.environment.exhaustion.count
+
+Any exhaustion.* leaf type
+
+signals.environment.exhaustion.severity
+
+“
+
+Legacy attributes (deprecated, still emitted)
+
+The following aggregate keys pre-date the paper taxonomy and are still
+emitted for one release so existing dashboards keep working. They are
+derived from the layered counts above and will be removed in a future
+release. Migrate to the layered keys when convenient.
+
+
+
+
+
+Legacy attribute
+
+Layered equivalent
+
+signals.follow_up.repair.count
+
+signals.interaction.misalignment.count
+
+signals.follow_up.repair.ratio
+
+(computed: misalignment.count / max(user_turns, 1))
+
+signals.frustration.count
+
+Count of disengagement.negative_stance instances
+
+signals.frustration.severity
+
+Derived severity bucket of the above
+
+signals.repetition.count
+
+signals.interaction.stagnation.count
+
+signals.escalation.requested
+
+True if any disengagement.escalation or disengagement.quit fired
+
+signals.positive_feedback.count
+
+signals.interaction.satisfaction.count
+
+Span Events
+
+In addition to span attributes, every detected signal instance is emitted as
+a span event named signal.<dotted-type> (e.g.
+signal.interaction.satisfaction.gratitude). Each event carries:
+
+
+
+
+
+
+
+Event attribute
+
+Type
+
+Description
+
+signal.type
+
+string
+
+Full dotted signal type (same as the event name suffix).
+
+signal.message_index
+
+int
+
+Zero-based index of the message that triggered the signal.
+
+signal.confidence
+
+float
+
+Detector confidence in [0.0, 1.0].
+
+signal.snippet
+
+string
+
+Matched substring from the source message (when available).
+
+signal.metadata
+
+string (JSON)
+
+Per-detector metadata (pattern name, ratio values, etc.).
+
+Span events are the right surface for drill-down: attribute filters narrow
+traces, then events tell you which messages fired which signals with
+what evidence.
 
 Visual Flag Marker
 
-When concerning signals are detected (frustration, looping, escalation, or poor/severe quality), the flag marker 🚩 is automatically appended to the span’s operation name, making problematic traces easy to spot in your trace visualizations.
+When concerning signals are detected (disengagement present, stagnation
+count > 2, any execution failure / loop, or overall quality poor/
+severe), the marker 🚩 (U+1F6A9) is appended to the span’s operation
+name.
+This makes flagged sessions immediately visible in trace UIs without
+requiring attribute filtering.
 
 Querying in Your Observability Platform
 
-Example queries:
+Example queries against the layered keys:
 
-Find all severe interactions: signals.quality = "Severe"
+signals.quality = "severe"
+signals.turn_count > 10
+signals.efficiency_score < 0.5
+signals.interaction.disengagement.severity >= 2
+signals.interaction.misalignment.count > 3
+signals.interaction.satisfaction.count > 0 AND signals.quality = "good"
+signals.execution.failure.count > 0
+signals.environment.exhaustion.count > 0
 
-Find flagged traces: search for 🚩 in span names
+For flagged sessions, search for 🚩 in span names.
 
-Find long conversations: signals.turn_count > 10
 
-Find inefficient interactions: signals.efficiency_score < 0.5
 
-Find high repair rates: signals.repair.ratio > 0.3
+Severity Levels
 
-Find frustrated users: signals.frustration.severity >= 2
-
-Find looping agents: signals.repetition.count >= 3
-
-Find positive interactions: signals.positive_feedback.count >= 2
-
-Find escalations: signals.escalation.requested = "true"
-
-
-
-Core Signal Types
-
-The signals system tracks six categories of behavioral indicators.
-
-Turn Count & Efficiency
-
-What it measures
-
-Number of user–assistant exchanges.
-
-Why it matters
-
-Long conversations often indicate unclear intent resolution, confusion, or inefficiency. Very short conversations can correlate with crisp resolution.
-
-Key metrics
-
-Total turn count
-
-Warning thresholds (concerning: >7 turns, excessive: >12 turns)
-
-Efficiency score (0.0–1.0)
-
-Efficiency scoring
-
-Baseline expectation is ~5 turns (tunable). Efficiency stays at 1.0 up to the baseline, then declines with an inverse penalty as turns exceed baseline:
-
-efficiency = 1 / (1 + 0.3 * (turns - baseline))
-
-Follow-Up & Repair Frequency
-
-What it measures
-
-How often users clarify, correct, or rephrase requests. This is a user signal tracking query reformulation behavior—when users must repair or rephrase their requests because the agent didn’t understand or respond appropriately.
-
-Why it matters
-
-High repair frequency is a proxy for misunderstanding or intent drift. When users repeatedly rephrase the same request, it indicates the agent is failing to grasp or act on the user’s intent.
-
-Key metrics
-
-Repair count and ratio (repairs / user turns)
-
-Concerning threshold: >30% repair ratio
-
-Detected repair phrases (exact or fuzzy)
-
-Common patterns detected
-
-Explicit corrections: “I meant”, “correction”
-
-Negations: “No, I…”, “that’s not”
-
-Rephrasing: “let me rephrase”, “to clarify”
-
-Mistake acknowledgment: “my mistake”, “I was wrong”
-
-“Similar rephrase” heuristic based on token overlap (with stopwords downweighted)
-
-User Frustration
-
-What it measures
-
-Observable frustration indicators and emotional escalation.
-
-Why it matters
-
-Catching frustration early enables intervention before users abandon or escalate.
-
-Detection patterns
-
-Complaints: “this doesn’t work”, “not helpful”, “waste of time”
-
-Confusion: “I don’t understand”, “makes no sense”, “I’m confused”
-
-Tone markers:
-
-ALL CAPS (>=10 alphabetic chars and >=80% uppercase)
-
-Excessive punctuation (>=3 exclamation marks or >=3 question marks)
-
-Profanity: token-based (avoids substring false positives like “absolute” -> “bs”)
-
-Severity levels
-
-None (0): no indicators
-
-Mild (1): 1–2 indicators
-
-Moderate (2): 3–4 indicators
-
-Severe (3): 5+ indicators
-
-Repetition & Looping
-
-What it measures
-
-Assistant repetition / degenerative loops. This is an assistant signal tracking when the agent repeats itself, fails to follow instructions, or gets stuck in loops—indicating the agent is not making progress or adapting its responses.
-
-Why it matters
-
-Often indicates missing state tracking, broken tool integration, prompt issues, or the agent ignoring user corrections. High repetition means the agent is not learning from the conversation context.
-
-Detection method
-
-Compare assistant messages using bigram Jaccard similarity
-
-Classify:
-
-Exact: similarity >= 0.85
-
-Near-duplicate: similarity >= 0.50
-
-Looping is flagged when repetition instances exceed 2 in a session.
-
-Severity levels
+Every category aggregates its leaf signal counts into a severity bucket used
+by both the layered .severity attribute and the overall quality score.
 
 None (0): 0 instances
 
@@ -2784,89 +3143,62 @@ Moderate (2): 3–4 instances
 
 Severe (3): 5+ instances
 
-Positive Feedback
-
-What it measures
-
-User expressions of satisfaction, gratitude, and success.
-
-Why it matters
-
-Strong positive signals identify exemplar traces for prompt engineering and evaluation.
-
-Detection patterns
-
-Gratitude: “thank you”, “appreciate it”
-
-Satisfaction: “that’s great”, “awesome”, “love it”
-
-Success confirmation: “got it”, “that worked”, “perfect”
-
-Confidence scoring
-
-1 indicator: 0.6
-
-2 indicators: 0.8
-
-3+ indicators: 0.95
-
-Escalation Requests
-
-What it measures
-
-Requests for human help/support or threats to quit.
-
-Why it matters
-
-Escalation is a strong signal that the agent failed to resolve the interaction.
-
-Detection patterns
-
-Human requests: “speak to a human”, “real person”, “live agent”
-
-Support: “contact support”, “customer service”, “help desk”
-
-Quit threats: “I’m done”, “forget it”, “I give up”
+Severity is always computed per-category. For example, three instances of
+misalignment.rephrase plus two of misalignment.correction yield
+signals.interaction.misalignment.severity = 3 (5 instances total).
 
 Overall Quality Assessment
 
-Signals are aggregated into an overall interaction quality on a 5-point scale.
+Signals are aggregated into an overall interaction quality on a 5-point
+scale. The scoring model starts at 50.0 (neutral), adds positive weight for
+satisfaction, and subtracts weight for disengagement, misalignment (when
+ratio > 30% of user turns), stagnation (when count > 2), execution failures,
+execution loops, and environment exhaustion.
 
-Excellent
+The resulting numeric score maps to the bucket emitted in signals.quality:
+
+Excellent (75 – 100)
 
 Strong positive signals, efficient resolution, low friction.
 
-Good
+Good (60 – 74)
 
-Mostly positive with minor clarifications; some back-and-forth but successful.
+Mostly positive with minor clarifications; some back-and-forth but
+successful.
 
-Neutral
+Neutral (40 – 59)
 
 Mixed signals; neither clearly good nor bad.
 
-Poor
+Poor (25 – 39)
 
-Concerning negative patterns (high friction, multiple repairs, moderate frustration). High abandonment risk.
+Concerning negative patterns (high friction, multiple misalignments,
+moderate disengagement, tool failures). High abandonment risk.
 
-Severe
+Severe (0 – 24)
 
-Critical issues—escalation requested, severe frustration, severe looping, or excessive turns (>12). Requires immediate attention.
+Critical issues — escalation requested, severe disengagement, severe
+stagnation, or compounding failures. Requires immediate attention.
 
-This assessment uses a scoring model that weighs positive factors (efficiency, positive feedback) against negative ones (frustration, repairs, repetition, escalation).
+The raw numeric score is available under signals.quality_score.
 
 Sampling and Prioritization
 
-In production, trace data is overwhelming. Signals provide a lightweight first layer of analysis to prioritize which sessions deserve review.
+In production, trace data is overwhelming. Signals provide a lightweight
+first layer of triage to select the small fraction of trajectories that are
+most likely to be informative. Per the paper, signal-based sampling reaches
+82% informativeness on τ-bench versus 54% for random sampling — a 1.52×
+efficiency gain per informative trajectory.
 
 Workflow:
 
 Gateway captures conversation messages and computes signals
 
-Signal attributes are emitted to OTEL spans automatically
+Signal attributes and per-instance events are emitted to OTEL spans
 
 Your observability platform ingests and indexes the attributes
 
-Query/filter by signal attributes to surface outliers (poor/severe and exemplars)
+Query / filter by signal attributes to surface outliers and exemplars
 
 Review high-information traces to identify improvement opportunities
 
@@ -2874,32 +3206,50 @@ Update prompts, routing, or policies based on findings
 
 Redeploy and monitor signal metrics to validate improvements
 
-This creates a reinforcement loop where traces become both diagnostic data and training signal.
+This creates a reinforcement loop where traces become both diagnostic data
+and training signal for prompt engineering, routing policies, and
+preference-data construction.
 
-Trace Filtering and Telemetry
+An in-gateway triage sampler that selects informative trajectories
+inline — with configurable per-category weights and budgets — is planned
+as a follow-up to this release. Today, sampling is consumer-side: your
+observability platform filters on the signal attributes described above.
 
-Signal attributes are automatically added to OpenTelemetry spans, making them immediately queryable in your observability platform.
+Example Span
 
-Visual Filtering
+A concerning session, showing both layered attributes and a per-instance
+event:
 
-When concerning signals are detected, the flag marker 🚩 (U+1F6A9) is automatically appended to the span’s operation name. This makes flagged sessions immediately visible in trace visualizations without requiring attribute filtering.
+# Span name: "POST /v1/chat/completions gpt-5.2 🚩"
 
-Example Span Attributes:
+# Top-level
+signals.quality            = "severe"
+signals.quality_score      = 0.0
+signals.turn_count         = 4
+signals.efficiency_score   = 1.0
 
-# Span name: "POST /v1/chat/completions gpt-4 🚩"
-signals.quality = "Severe"
-signals.turn_count = 15
-signals.efficiency_score = 0.234
-signals.repair.count = 4
-signals.repair.ratio = 0.571
-signals.frustration.severity = 3
-signals.frustration.count = 5
-signals.escalation.requested = "true"
-signals.repetition.count = 4
+# Layered (only non-zero categories are emitted)
+signals.interaction.disengagement.count    = 6
+signals.interaction.disengagement.severity = 3
+
+# Legacy (deprecated, emitted while dual-emit is on)
+signals.frustration.count     = 4
+signals.frustration.severity  = 2
+signals.escalation.requested  = true
+
+# Per-instance span events
+event: signal.interaction.disengagement.escalation
+  signal.type          = "interaction.disengagement.escalation"
+  signal.message_index = 6
+  signal.confidence    = 1.0
+  signal.snippet       = "get me a human"
+  signal.metadata      = {"pattern_type":"escalation"}
 
 Building Dashboards
 
-Use signal attributes to build monitoring dashboards in Grafana, Honeycomb, Datadog, etc.:
+Use signal attributes to build monitoring dashboards in Grafana, Honeycomb,
+Datadog, etc. Prefer the layered keys — they align with the paper taxonomy
+and will outlive the legacy keys.
 
 Quality distribution: Count of traces by signals.quality
 
@@ -2907,47 +3257,72 @@ P95 turn count: 95th percentile of signals.turn_count
 
 Average efficiency: Mean of signals.efficiency_score
 
-High repair rate: Percentage where signals.repair.ratio > 0.3
+High misalignment rate: Percentage where
+signals.interaction.misalignment.count > 3
 
-Frustration rate: Percentage where signals.frustration.severity >= 2
+Disengagement rate: Percentage where
+signals.interaction.disengagement.severity >= 2
 
-Escalation rate: Percentage where signals.escalation.requested = "true"
+Satisfaction rate: Percentage where
+signals.interaction.satisfaction.count >= 1
 
-Looping rate: Percentage where signals.repetition.count >= 3
+Escalation rate: Percentage where a disengagement.escalation or
+disengagement.quit event fired (via span-event filter)
 
-Positive feedback rate: Percentage where signals.positive_feedback.count >= 1
+Tool-failure rate: Percentage where
+signals.execution.failure.count > 0
+
+Environment issue rate: Percentage where
+signals.environment.exhaustion.count > 0
 
 Creating Alerts
 
 Set up alerts based on signal thresholds:
 
-Alert when severe interaction count exceeds threshold in 1-hour window
+Alert when signals.quality = "severe" count exceeds threshold in a
+1-hour window
 
-Alert on sudden spike in frustration rate (>2x baseline)
+Alert on sudden spike in
+signals.interaction.disengagement.severity >= 2 (>2× baseline)
 
-Alert when escalation rate exceeds 5% of total conversations
+Alert on sustained signals.execution.failure.count > 0 — agent-caused
+tool issues
 
-Alert on degraded efficiency (P95 turn count increases >50%)
+Alert on spikes in signals.environment.exhaustion.count — external
+system degradation
+
+Alert on degraded efficiency (P95 signals.turn_count up > 50%)
 
 Best Practices
 
 Start simple:
 
-Alert or page on Severe sessions (or on spikes in Severe rate)
+Alert or page on severe sessions (or on spikes in severe rate)
 
-Review Poor sessions within 24 hours
+Review poor sessions within 24 hours
 
-Sample Excellent sessions as exemplars
+Sample excellent sessions as exemplars
 
 Combine multiple signals to infer failure modes:
 
-Looping: repetition severity >= 2 + excessive turns
+Silent loop: signals.interaction.stagnation.severity >= 2 +
+signals.turn_count above baseline
 
-User giving up: frustration severity >= 2 + escalation requested
+User giving up: signals.interaction.disengagement.severity >= 2 +
+any escalation event
 
-Misunderstood intent: repair ratio > 30% + excessive turns
+Misunderstood intent:
+signals.interaction.misalignment.count / user_turns > 0.3
 
-Working well: positive feedback + high efficiency + no frustration
+Agent-caused friction: signals.execution.failure.count > 0 +
+signals.interaction.misalignment.count > 0
+
+External degradation, not agent fault:
+signals.environment.exhaustion.count > 0 while
+signals.execution.failure.count = 0
+
+Working well: signals.interaction.satisfaction.count >= 1 +
+signals.efficiency_score > 0.8 + no disengagement
 
 Limitations and Considerations
 
@@ -2963,7 +3338,7 @@ Non-English nuance (pattern libraries are English-oriented)
 
 Mitigation strategies:
 
-Periodically sample flagged sessions and measure false positives/negatives
+Periodically sample flagged sessions and measure false positives / negatives
 
 Tune baselines per use case and user population
 
@@ -2971,19 +3346,29 @@ Add domain-specific phrase libraries where needed
 
 Combine signals with non-text metrics (tool failures, disconnects, latency)
 
-Behavioral signals complement—but do not replace—domain-specific response quality evaluation. Use signals to prioritize which traces to inspect, then apply domain expertise and outcome checks to diagnose root causes.
+Behavioral signals complement — but do not replace — domain-specific
+response quality evaluation. Use signals to prioritize which traces to
+inspect, then apply domain expertise and outcome checks to diagnose root
+causes.
 
-The flag marker in the span name provides instant visual feedback in trace UIs, while the structured attributes (signals.quality, signals.frustration.severity, etc.) enable powerful querying and aggregation in your observability platform.
+The 🚩 marker in the span name provides instant visual feedback in
+trace UIs, while the structured attributes (signals.quality,
+signals.interaction.disengagement.severity, etc.) and per-instance
+span events enable powerful querying and drill-down in your observability
+platform.
 
 See Also
 
-../guides/observability/tracing - Distributed tracing for agent systems
+Signals: Trajectory Sampling and Triage for Agentic Interactions — the paper this framework implements
 
-../guides/observability/monitoring - Metrics and dashboards
+../guides/observability/tracing — Distributed tracing for agent
+systems
 
-../guides/observability/access_logging - Request/response logging
+../guides/observability/monitoring — Metrics and dashboards
 
-../guides/observability/observability - Complete observability guide
+../guides/observability/access_logging — Request / response logging
+
+../guides/observability/observability — Complete observability guide
 
 ---
 
@@ -3190,13 +3575,13 @@ $ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 Option 1: Install planoai with uv (Recommended)
 
-$ uv tool install planoai==0.4.18
+$ uv tool install planoai==0.4.22
 
 Option 2: Install with pip (Traditional)
 
 $ python -m venv venv
 $ source venv/bin/activate   # On Windows, use: venv\Scripts\activate
-$ pip install planoai==0.4.18
+$ pip install planoai==0.4.22
 
 
 
@@ -3444,6 +3829,49 @@ $ curl --header 'Content-Type: application/json' \
   http://localhost:10000/v1/chat/completions | jq ".choices[0].message.content"
 
 "Here is a list of the currencies that are supported for conversion from USD, along with their symbols:\n\n1. AUD - Australian Dollar\n2. BGN - Bulgarian Lev\n3. BRL - Brazilian Real\n4. CAD - Canadian Dollar\n5. CHF - Swiss Franc\n6. CNY - Chinese Renminbi Yuan\n7. CZK - Czech Koruna\n8. DKK - Danish Krone\n9. EUR - Euro\n10. GBP - British Pound\n11. HKD - Hong Kong Dollar\n12. HUF - Hungarian Forint\n13. IDR - Indonesian Rupiah\n14. ILS - Israeli New Sheqel\n15. INR - Indian Rupee\n16. ISK - Icelandic Króna\n17. JPY - Japanese Yen\n18. KRW - South Korean Won\n19. MXN - Mexican Peso\n20. MYR - Malaysian Ringgit\n21. NOK - Norwegian Krone\n22. NZD - New Zealand Dollar\n23. PHP - Philippine Peso\n24. PLN - Polish Złoty\n25. RON - Romanian Leu\n26. SEK - Swedish Krona\n27. SGD - Singapore Dollar\n28. THB - Thai Baht\n29. TRY - Turkish Lira\n30. USD - United States Dollar\n31. ZAR - South African Rand\n\nIf you want to convert USD to any of these currencies, you can select the one you are interested in."
+
+Observability
+
+Plano ships two CLI tools for visibility into LLM traffic. Both consume the same OTLP/gRPC span stream from brightstaff; they just slice it differently — use whichever (or both) fits the question you’re answering.
+
+Both require brightstaff to be exporting spans. If you’re running the zero-config path (planoai up with no config file), tracing is auto-wired to http://localhost:4317. If you have your own plano_config.yaml, add:
+
+tracing:
+  random_sampling: 100
+  opentracing_grpc_endpoint: http://localhost:4317
+
+Live console — planoai obs
+
+$ planoai obs
+# In another terminal:
+$ planoai up
+
+Cost is populated automatically from DigitalOcean’s public pricing catalog — no signup or token required.
+
+With no API keys set, every provider runs in pass-through mode — supply the Authorization header yourself on each request:
+
+$ curl localhost:12000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $DO_API_KEY" \
+    -d '{"model":"digitalocean/router:software-engineering",
+         "messages":[{"role":"user","content":"write code to print prime numbers in python"}],
+         "stream":false}'
+
+When you export OPENAI_API_KEY / ANTHROPIC_API_KEY / DO_API_KEY / etc. before planoai up, Plano picks them up and clients no longer need to send Authorization.
+
+Press Ctrl-C in the obs terminal to exit. Data lives in memory only — nothing is persisted to disk.
+
+Single-request traces — planoai trace
+
+When you need to understand what happened on one specific request (which model was picked, how long each hop took, what an upstream returned), use trace:
+
+$ planoai trace listen                 # start the OTLP listener (daemon)
+# drive some traffic through localhost:12000 ...
+$ planoai trace                        # show the most recent trace
+$ planoai trace <trace-id>             # show a specific trace by id
+$ planoai trace --list                 # list the last 50 trace ids
+
+Use obs to spot that p95 latency spiked for openai-gpt-5.4; switch to trace on one of those slow request ids to see which hop burned the time.
 
 Next Steps
 
@@ -3760,9 +4188,9 @@ response = client.chat.completions.create(
 
 
 
-Preference-aligned routing (Arch-Router)
+Preference-aligned routing (Plano-Orchestrator)
 
-Preference-aligned routing uses the Arch-Router model to pick the best LLM based on domain, action, and your configured preferences instead of hard-coding a model.
+Preference-aligned routing uses the Plano-Orchestrator model to pick the best LLM based on domain, action, and your configured preferences instead of hard-coding a model.
 
 Domain: High-level topic of the request (e.g., legal, healthcare, programming).
 
@@ -3770,60 +4198,74 @@ Action: What the user wants to do (e.g., summarize, generate code, translate).
 
 Routing preferences: Your mapping from (domain, action) to preferred models.
 
-Arch-Router analyzes each prompt to infer domain and action, then applies your preferences to select a model. This decouples routing policy (how to choose) from model assignment (what to run), making routing transparent, controllable, and easy to extend as you add or swap models.
+Plano-Orchestrator analyzes each prompt to infer domain and action, then applies your preferences to select a model. This decouples routing policy (how to choose) from model assignment (what to run), making routing transparent, controllable, and easy to extend as you add or swap models.
 
 Configuration
 
-To configure preference-aligned dynamic routing, define routing preferences that map domains and actions to specific models:
+To configure preference-aligned dynamic routing, declare a top-level routing_preferences list and attach an ordered models candidate pool to each route. Starting in v0.4.0, routing_preferences lives at the root of the config (not inline under model_providers), which lets multiple models serve the same route — the first entry in models is primary, the rest are fallbacks that the client tries on 429/5xx errors.
 
 Preference-Aligned Dynamic Routing Configuration
 
+version: v0.4.0
+
 listeners:
-  egress_traffic:
+  - name: egress_traffic
+    type: model
     address: 0.0.0.0
     port: 12000
-    message_format: openai
     timeout: 30s
 
-llm_providers:
+model_providers:
   - model: openai/gpt-5.2
     access_key: $OPENAI_API_KEY
     default: true
 
   - model: openai/gpt-5
     access_key: $OPENAI_API_KEY
-    routing_preferences:
-      - name: code understanding
-        description: understand and explain existing code snippets, functions, or libraries
-      - name: complex reasoning
-        description: deep analysis, mathematical problem solving, and logical reasoning
 
   - model: anthropic/claude-sonnet-4-5
     access_key: $ANTHROPIC_API_KEY
-    routing_preferences:
-      - name: creative writing
-        description: creative content generation, storytelling, and writing assistance
-      - name: code generation
-        description: generating new code snippets, functions, or boilerplate based on user prompts
+
+routing_preferences:
+  - name: code understanding
+    description: understand and explain existing code snippets, functions, or libraries
+    models:
+      - openai/gpt-5
+      - anthropic/claude-sonnet-4-5
+  - name: complex reasoning
+    description: deep analysis, mathematical problem solving, and logical reasoning
+    models:
+      - openai/gpt-5
+  - name: creative writing
+    description: creative content generation, storytelling, and writing assistance
+    models:
+      - anthropic/claude-sonnet-4-5
+  - name: code generation
+    description: generating new code snippets, functions, or boilerplate based on user prompts
+    models:
+      - anthropic/claude-sonnet-4-5
+      - openai/gpt-5
+
+Configs still using the v0.3.0 inline style (routing_preferences nested under each model_provider) are auto-migrated to this top-level shape by the Plano CLI at compile time, with a deprecation warning. Update your config to the form above to silence the warning.
 
 Client usage
 
 Clients can let the router decide or still specify aliases:
 
-# Let Arch-Router choose based on content
+# Let Plano-Orchestrator choose based on content
 response = client.chat.completions.create(
     messages=[{"role": "user", "content": "Write a creative story about space exploration"}]
     # No model specified - router will analyze and choose claude-sonnet-4-5
 )
 
-Arch-Router
+Plano-Orchestrator
 
-The Arch-Router is a state-of-the-art preference-based routing model specifically designed to address the limitations of traditional LLM routing. This compact 1.5B model delivers production-ready performance with low latency and high accuracy while solving key routing challenges.
+Plano-Orchestrator is a preference-based routing model specifically designed to address the limitations of traditional LLM routing. It delivers production-ready performance with low latency and high accuracy while solving key routing challenges.
 
 Addressing Traditional Routing Limitations:
 
 Human Preference Alignment
-Unlike benchmark-driven approaches, Arch-Router learns to match queries with human preferences by using domain-action mappings that capture subjective evaluation criteria, ensuring routing decisions align with real-world user needs.
+Unlike benchmark-driven approaches, Plano-Orchestrator learns to match queries with human preferences by using domain-action mappings that capture subjective evaluation criteria, ensuring routing decisions align with real-world user needs.
 
 Flexible Model Integration
 The system supports seamlessly adding new models for routing without requiring retraining or architectural modifications, enabling dynamic adaptation to evolving model landscapes.
@@ -3831,15 +4273,15 @@ The system supports seamlessly adding new models for routing without requiring r
 Preference-Encoded Routing
 Provides a practical mechanism to encode user preferences through domain-action mappings, offering transparent and controllable routing decisions that can be customized for specific use cases.
 
-To support effective routing, Arch-Router introduces two key concepts:
+To support effective routing, Plano-Orchestrator introduces two key concepts:
 
 Domain – the high-level thematic category or subject matter of a request (e.g., legal, healthcare, programming).
 
 Action – the specific type of operation the user wants performed (e.g., summarization, code generation, booking appointment, translation).
 
-Both domain and action configs are associated with preferred models or model variants. At inference time, Arch-Router analyzes the incoming prompt to infer its domain and action using semantic similarity, task indicators, and contextual cues. It then applies the user-defined routing preferences to select the model best suited to handle the request.
+Both domain and action configs are associated with preferred models or model variants. At inference time, Plano-Orchestrator analyzes the incoming prompt to infer its domain and action using semantic similarity, task indicators, and contextual cues. It then applies the user-defined routing preferences to select the model best suited to handle the request.
 
-In summary, Arch-Router demonstrates:
+In summary, Plano-Orchestrator demonstrates:
 
 Structured Preference Routing: Aligns prompt request with model strengths using explicit domain–action mappings.
 
@@ -3849,9 +4291,9 @@ Flexible and Adaptive: Supports evolving user needs, model updates, and new doma
 
 Production-Ready Performance: Optimized for low-latency, high-throughput applications in multi-model environments.
 
-Self-hosting Arch-Router
+Self-hosting Plano-Orchestrator
 
-By default, Plano uses a hosted Arch-Router endpoint. To run Arch-Router locally, you can serve the model yourself using either Ollama or vLLM.
+By default, Plano uses a hosted Plano-Orchestrator endpoint. To run Plano-Orchestrator locally, you can serve the model yourself using either Ollama or vLLM.
 
 Using Ollama (recommended for local development)
 
@@ -3859,14 +4301,16 @@ Install Ollama
 
 Download and install from ollama.ai.
 
-Pull and serve Arch-Router
+Pull and serve the routing model
 
 ollama pull hf.co/katanemo/Arch-Router-1.5B.gguf:Q4_K_M
 ollama serve
 
 This downloads the quantized GGUF model from HuggingFace and starts serving on http://localhost:11434.
 
-Configure Plano to use local Arch-Router
+Configure Plano to use local routing model
+
+version: v0.4.0
 
 overrides:
   llm_routing_model: plano/hf.co/katanemo/Arch-Router-1.5B.gguf:Q4_K_M
@@ -3881,9 +4325,12 @@ model_providers:
 
   - model: anthropic/claude-sonnet-4-5
     access_key: $ANTHROPIC_API_KEY
-    routing_preferences:
-      - name: creative writing
-        description: creative content generation, storytelling, and writing assistance
+
+routing_preferences:
+  - name: creative writing
+    description: creative content generation, storytelling, and writing assistance
+    models:
+      - anthropic/claude-sonnet-4-5
 
 Verify the model is running
 
@@ -3919,18 +4366,20 @@ vllm serve ${SNAPSHOT_DIR}Arch-Router-1.5B-Q4_K_M.gguf \
     --load-format gguf \
     --chat-template ${SNAPSHOT_DIR}template.jinja \
     --tokenizer katanemo/Arch-Router-1.5B \
-    --served-model-name Arch-Router \
+    --served-model-name Plano-Orchestrator \
     --gpu-memory-utilization 0.3 \
     --tensor-parallel-size 1 \
     --enable-prefix-caching
 
 Configure Plano to use the vLLM endpoint
 
+version: v0.4.0
+
 overrides:
-  llm_routing_model: plano/Arch-Router
+  llm_routing_model: plano/Plano-Orchestrator
 
 model_providers:
-  - model: plano/Arch-Router
+  - model: plano/Plano-Orchestrator
     base_url: http://<your-server-ip>:10000
 
   - model: openai/gpt-5.2
@@ -3939,9 +4388,12 @@ model_providers:
 
   - model: anthropic/claude-sonnet-4-5
     access_key: $ANTHROPIC_API_KEY
-    routing_preferences:
-      - name: creative writing
-        description: creative content generation, storytelling, and writing assistance
+
+routing_preferences:
+  - name: creative writing
+    description: creative content generation, storytelling, and writing assistance
+    models:
+      - anthropic/claude-sonnet-4-5
 
 Verify the server is running
 
@@ -3950,16 +4402,16 @@ curl http://localhost:10000/v1/models
 
 Using vLLM on Kubernetes (GPU nodes)
 
-For teams running Kubernetes, Arch-Router and Plano can be deployed as in-cluster services.
+For teams running Kubernetes, Plano-Orchestrator and Plano can be deployed as in-cluster services.
 The demos/llm_routing/model_routing_service/ directory includes ready-to-use manifests:
 
-vllm-deployment.yaml — Arch-Router served by vLLM, with an init container to download
+vllm-deployment.yaml — Plano-Orchestrator served by vLLM, with an init container to download
 the model from HuggingFace
 
-plano-deployment.yaml — Plano proxy configured to use the in-cluster Arch-Router
+plano-deployment.yaml — Plano proxy configured to use the in-cluster Plano-Orchestrator
 
 config_k8s.yaml — Plano config with llm_routing_model pointing at
-http://arch-router:10000 instead of the default hosted endpoint
+http://plano-orchestrator:10000 instead of the default hosted endpoint
 
 Key things to know before deploying:
 
@@ -4011,28 +4463,74 @@ routing:
 
 To start a new routing decision (e.g., when the agent’s task changes), generate a new affinity ID.
 
+Session Cache Backends
+
+By default, Plano stores session affinity state in an in-process LRU cache. This works well for single-instance deployments, but sessions are not shared across replicas — each instance has its own independent cache.
+
+For deployments with multiple Plano replicas (Kubernetes, Docker Compose with scale, or any load-balanced setup), use Redis as the session cache backend. All replicas connect to the same Redis instance, so an affinity decision made by one replica is honoured by every other replica in the pool.
+
+In-memory (default)
+
+No configuration required. Sessions live only for the lifetime of the process and are lost on restart.
+
+routing:
+  session_ttl_seconds: 600    # How long affinity lasts (default: 10 min)
+  session_max_entries: 10000  # LRU capacity (upper limit: 10000)
+
+Redis
+
+Requires a reachable Redis instance. The url field supports standard Redis URI syntax, including authentication (redis://:password@host:6379) and TLS (rediss://host:6380). Redis handles TTL expiry natively, so no periodic cleanup is needed.
+
+routing:
+  session_ttl_seconds: 600
+  session_cache:
+    type: redis
+    url: redis://localhost:6379
+
+When using Redis in a multi-tenant environment, construct the X-Model-Affinity header value to include a tenant identifier, for example {tenant_id}:{session_id}. Plano stores each key under the internal namespace plano:affinity:{key}, so tenant-scoped values avoid cross-tenant collisions without any additional configuration.
+
+Example: Kubernetes multi-replica deployment
+
+Deploy a Redis instance alongside your Plano pods and point all replicas at it:
+
+routing:
+  session_ttl_seconds: 600
+  session_cache:
+    type: redis
+    url: redis://redis.plano.svc.cluster.local:6379
+
+With this configuration, any replica that first receives a request for affinity ID abc-123 caches the routing decision in Redis. Subsequent requests for abc-123 — regardless of which replica they land on — retrieve the same pinned model.
+
 Combining Routing Methods
 
 You can combine static model selection with dynamic routing preferences for maximum flexibility:
 
 Hybrid Routing Configuration
 
-llm_providers:
+version: v0.4.0
+
+model_providers:
   - model: openai/gpt-5.2
     access_key: $OPENAI_API_KEY
     default: true
 
   - model: openai/gpt-5
     access_key: $OPENAI_API_KEY
-    routing_preferences:
-      - name: complex_reasoning
-        description: deep analysis and complex problem solving
 
   - model: anthropic/claude-sonnet-4-5
     access_key: $ANTHROPIC_API_KEY
-    routing_preferences:
-      - name: creative_tasks
-        description: creative writing and content generation
+
+routing_preferences:
+  - name: complex_reasoning
+    description: deep analysis and complex problem solving
+    models:
+      - openai/gpt-5
+      - anthropic/claude-sonnet-4-5
+  - name: creative_tasks
+    description: creative writing and content generation
+    models:
+      - anthropic/claude-sonnet-4-5
+      - openai/gpt-5
 
 model_aliases:
   # Model aliases - friendly names that map to actual provider names
@@ -4054,7 +4552,7 @@ Let the router decide: No model specified, router analyzes content
 
 Example Use Cases
 
-Here are common scenarios where Arch-Router excels:
+Here are common scenarios where Plano-Orchestrator excels:
 
 Coding Tasks: Distinguish between code generation requests (“write a Python function”), debugging needs (“fix this error”), and code optimization (“make this faster”), routing each to appropriately specialized models.
 
@@ -4096,13 +4594,13 @@ Best practices
 
 Unsupported Features
 
-The following features are not supported by the Arch-Router model:
+The following features are not supported by the Plano-Orchestrator routing model:
 
 Multi-modality: The model is not trained to process raw image or audio inputs. It can handle textual queries about these modalities (e.g., “generate an image of a cat”), but cannot interpret encoded multimedia data directly.
 
-Function calling: Arch-Router is designed for semantic preference matching, not exact intent classification or tool execution. For structured function invocation, use models in the Plano Function Calling collection instead.
+Function calling: Plano-Orchestrator is designed for semantic preference matching, not exact intent classification or tool execution. For structured function invocation, use models in the Plano Function Calling collection instead.
 
-System prompt dependency: Arch-Router routes based solely on the user’s conversation history. It does not use or rely on system prompts for routing decisions.
+System prompt dependency: Plano-Orchestrator routes based solely on the user’s conversation history. It does not use or rely on system prompts for routing decisions.
 
 ---
 
@@ -4237,6 +4735,60 @@ datasources:
     access: proxy
     editable: true
 
+Brightstaff metrics
+
+In addition to Envoy’s stats on :9901, the brightstaff dataplane
+process exposes its own Prometheus endpoint on 0.0.0.0:9092 (override
+with METRICS_BIND_ADDRESS). It publishes:
+
+HTTP RED — brightstaff_http_requests_total,
+brightstaff_http_request_duration_seconds,
+brightstaff_http_in_flight_requests (labels: handler, method,
+status_class).
+
+LLM upstream — brightstaff_llm_upstream_requests_total,
+brightstaff_llm_upstream_duration_seconds,
+brightstaff_llm_time_to_first_token_seconds,
+brightstaff_llm_tokens_total (labels: provider, model,
+error_class, kind).
+
+Routing — brightstaff_router_decisions_total,
+brightstaff_router_decision_duration_seconds,
+brightstaff_routing_service_requests_total,
+brightstaff_session_cache_events_total.
+
+Process & build — process_resident_memory_bytes,
+process_cpu_seconds_total, brightstaff_build_info.
+
+A self-contained Prometheus + Grafana stack is shipped under
+config/grafana/. With Plano already running on the host, bring it up
+with one command:
+
+cd config/grafana
+docker compose up -d
+open http://localhost:3000   # admin / admin (anonymous viewer also enabled)
+
+Grafana auto-loads the Prometheus datasource and the brightstaff
+dashboard (look under the Plano folder). Prometheus scrapes the host’s
+:9092 and :9901 via host.docker.internal.
+
+Files:
+
+config/grafana/docker-compose.yaml — one-command Prom + Grafana
+stack with provisioning.
+
+config/grafana/prometheus_scrape.yaml — complete Prometheus config
+with envoy and brightstaff scrape jobs (mounted by the
+compose).
+
+config/grafana/brightstaff_dashboard.json — 19-panel dashboard
+across HTTP RED, LLM upstream, Routing service, and Process & Envoy
+link rows. Auto-provisioned by the compose; can also be imported by
+hand via Dashboards → New → Import.
+
+config/grafana/provisioning/ — Grafana provisioning files for the
+datasource and dashboard provider.
+
 ---
 
 Observability
@@ -4352,23 +4904,23 @@ This creates a complete end-to-end trace showing the full request lifecycle thro
 
 Behavioral Signals in Traces
 
-Plano automatically enriches OpenTelemetry traces with ../../concepts/signals — behavioral quality indicators computed from conversation patterns. These signals are attached as span attributes, providing immediate visibility into interaction quality.
+Plano automatically enriches OpenTelemetry traces with ../../concepts/signals — lightweight, model-free behavioral indicators organized into three layers (interaction, execution, environment) per Chen et al., 2026. Signals are attached as span attributes and per-instance span events, providing immediate visibility into interaction quality.
 
 What Signals Provide
 
 Signals act as early warning indicators embedded in your traces:
 
-Quality Assessment: Overall interaction quality (Excellent/Good/Neutral/Poor/Severe)
+Quality Assessment: Overall interaction quality (excellent / good / neutral / poor / severe) and numeric score
 
-Efficiency Metrics: Turn count, efficiency scores, repair frequency
+Interaction layer: misalignment, stagnation, disengagement, satisfaction
 
-User Sentiment: Frustration indicators, positive feedback, escalation requests
+Execution layer: tool failures and loop patterns (from function_call / observation traces)
 
-Agent Behavior: Repetition detection, looping patterns
+Environment layer: exhaustion (API errors, timeouts, rate limits, context overflow)
 
 Visual Flag Markers
 
-When concerning signals are detected (frustration, looping, escalation, or poor/severe quality), Plano automatically appends a flag marker 🚩 to the span’s operation name. This makes problematic traces immediately visible in your tracing UI without requiring additional queries.
+When concerning signals are detected (disengagement, execution failures / loops, stagnation > 2, or poor / severe quality), Plano automatically appends a 🚩 marker to the span’s operation name. This makes problematic traces immediately visible in your tracing UI without requiring additional queries.
 
 Example Span with Signals:
 
@@ -4377,26 +4929,42 @@ Example Span with Signals:
 llm.model = "gpt-4"
 llm.usage.total_tokens = 225
 
-# Behavioral signal attributes:
-signals.quality = "Severe"
-signals.turn_count = 15
-signals.efficiency_score = 0.234
-signals.frustration.severity = 3
-signals.escalation.requested = "true"
+# Top-level signal attributes:
+signals.quality            = "severe"
+signals.quality_score      = 0.0
+signals.turn_count         = 15
+signals.efficiency_score   = 0.234
+
+# Layered attributes (only non-zero categories are emitted):
+signals.interaction.misalignment.count     = 4
+signals.interaction.misalignment.severity  = 2
+signals.interaction.disengagement.count    = 5
+signals.interaction.disengagement.severity = 3
+
+# Per-instance span event:
+event: signal.interaction.disengagement.escalation
+  signal.type          = "interaction.disengagement.escalation"
+  signal.message_index = 14
+  signal.confidence    = 1.0
+  signal.snippet       = "get me a human"
 
 Querying Signal Data
 
 In your observability platform (Jaeger, Grafana Tempo, Datadog, etc.), filter traces by signal attributes:
 
-Find severe interactions: signals.quality = "Severe"
+Find severe interactions: signals.quality = "severe"
 
-Find frustrated users: signals.frustration.severity >= 2
+Find disengaged users: signals.interaction.disengagement.severity >= 2
+
+Find misaligned interactions: signals.interaction.misalignment.count > 3
+
+Find tool failures: signals.execution.failure.count > 0
+
+Find external issues: signals.environment.exhaustion.count > 0
 
 Find inefficient flows: signals.efficiency_score < 0.5
 
-Find escalations: signals.escalation.requested = "true"
-
-For complete details on all available signals, detection methods, and best practices, see the ../../concepts/signals guide.
+For complete details on all 20 leaf signal types, severity scheme, legacy attribute deprecation, and best practices, see the ../../concepts/signals guide.
 
 Custom Span Attributes
 
@@ -6382,7 +6950,7 @@ where prompts get routed to, apply guardrails, and enable critical agent observa
 Plano Configuration - Full Reference
 
 # Plano Gateway configuration version
-version: v0.3.0
+version: v0.4.0
 
 # External HTTP agents - API type is controlled by request path (/v1/responses, /v1/messages, /v1/chat/completions)
 agents:
@@ -6415,17 +6983,8 @@ model_providers:
   - model: mistral/ministral-3b-latest
     access_key: $MISTRAL_API_KEY
 
-  # routing_preferences: tags a model with named capabilities so Plano's LLM router
-  # can select the best model for each request based on intent. Requires the
-  # Arch-Router model (or equivalent) to be configured in overrides.llm_routing_model.
-  # Each preference has a name (short label) and a description (used for intent matching).
   - model: groq/llama-3.3-70b-versatile
     access_key: $GROQ_API_KEY
-    routing_preferences:
-      - name: code generation
-        description: generating new code snippets, functions, or boilerplate based on user prompts or requirements
-      - name: code review
-        description: reviewing, analyzing, and suggesting improvements to existing code
 
   # passthrough_auth: forwards the client's Authorization header upstream instead of
   # using the configured access_key. Useful for LiteLLM or similar proxy setups.
@@ -6446,6 +7005,29 @@ model_aliases:
 
   smart-llm:
     target: gpt-4o
+
+# routing_preferences: top-level list that tags named task categories with an
+# ordered pool of candidate models. Plano's LLM router matches incoming requests
+# against these descriptions and returns an ordered list of models; the client
+# uses models[0] as primary and retries with models[1], models[2]... on 429/5xx.
+# Requires overrides.llm_routing_model to point at Plano-Orchestrator (or equivalent).
+# Each model in `models` must be declared in model_providers above.
+# selection_policy is optional: {prefer: cheapest|fastest|none} lets the router
+# reorder candidates using live cost/latency data from model_metrics_sources.
+routing_preferences:
+  - name: code generation
+    description: generating new code snippets, functions, or boilerplate based on user prompts or requirements
+    models:
+      - anthropic/claude-sonnet-4-0
+      - openai/gpt-4o
+      - groq/llama-3.3-70b-versatile
+  - name: code review
+    description: reviewing, analyzing, and suggesting improvements to existing code
+    models:
+      - anthropic/claude-sonnet-4-0
+      - groq/llama-3.3-70b-versatile
+    selection_policy:
+      prefer: cheapest
 
 # HTTP listeners - entry points for agent routing, prompt targets, and direct LLM access
 listeners:
@@ -6553,14 +7135,25 @@ overrides:
   # Path to the trusted CA bundle for upstream TLS verification
   upstream_tls_ca_path: /etc/ssl/certs/ca-certificates.crt
   # Model used for intent-based LLM routing (must be listed in model_providers)
-  llm_routing_model: Arch-Router
+  llm_routing_model: Plano-Orchestrator
   # Model used for agent orchestration (must be listed in model_providers)
   agent_orchestration_model: Plano-Orchestrator
+  # Disable agentic signal analysis (frustration, repetition, escalation, etc.)
+  # on LLM responses to save CPU. Default: false.
+  disable_signals: false
 
 # Model affinity — pin routing decisions for agentic loops
 routing:
   session_ttl_seconds: 600    # How long a pinned session lasts (default: 600s / 10 min)
   session_max_entries: 10000  # Max cached sessions before eviction (upper limit: 10000)
+  # session_cache controls the backend used to store affinity state.
+  # "memory" (default) is in-process and works for single-instance deployments.
+  # "redis" shares state across replicas — required for multi-replica / Kubernetes setups.
+  session_cache:
+    type: memory              # "memory" (default) or "redis"
+    # url is required when type is "redis". Supports redis:// and rediss:// (TLS).
+    # url: redis://localhost:6379
+    # tenant_header: x-org-id  # optional; when set, keys are scoped as plano:affinity:{tenant_id}:{session_id}
 
 # State storage for multi-turn conversation history
 state_storage:
@@ -6651,7 +7244,7 @@ Create a docker-compose.yml file with the following configuration:
 # docker-compose.yml
 services:
   plano:
-    image: katanemo/plano:0.4.18
+    image: katanemo/plano:0.4.22
     container_name: plano
     ports:
       - "10000:10000" # ingress (client -> plano)
@@ -6721,7 +7314,7 @@ spec:
     spec:
       containers:
         - name: plano
-          image: katanemo/plano:0.4.18
+          image: katanemo/plano:0.4.22
           ports:
             - containerPort: 12000  # LLM gateway (chat completions, model routing)
               name: llm-gateway
